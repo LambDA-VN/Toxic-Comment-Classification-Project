@@ -21,63 +21,49 @@ LABELS = ["toxic", "severe_toxic", "obscene", "threat", "insult", "identity_hate
 
 
 # HELPERS
-def pos_weight_from(labels_array):
-    positive_rate = labels_array.mean(axis=0)
-    weight_values = (1 - positive_rate) / np.clip(positive_rate, 1e-6, 1.0)
-    return torch.tensor(np.clip(weight_values, 1.0, 10.0), dtype=torch.float)
+def pos_weight_from(y):
+    import numpy as np
+    # same formula, just using numpy fully (library)
+    positive = y.mean(axis=0)
+    weights = (1 - positive) / np.clip(positive, 1e-6, 1.0)
+    return torch.tensor(np.clip(weights, 1.0, 10.0), dtype=torch.float)
 
 
-def tune_thresholds(true_labels, predicted_scores):
-    thresholds = []
-    for idx in range(true_labels.shape[1]):
-        scores = predicted_scores[:, idx]
-        labels = true_labels[:, idx]
-
-        if labels.sum() == 0:
-            thresholds.append(0.5)
+def tune_thresholds(y_true, y_score):
+    thr = []
+    for i in range(y_true.shape[1]):
+        s, y = y_score[:, i], y_true[:, i]
+        if y.sum() == 0:
+            thr.append(0.5)
             continue
-
-        best_threshold, best_f1 = 0.5, -1.0
-        for threshold in np.unique(scores):
-            f1 = f1_score(labels, (scores >= threshold).astype(int), zero_division=0)
+        best_t, best_f1 = 0.5, -1.0
+        for t in np.unique(s):
+            f1 = f1_score(y, (s >= t).astype(int), zero_division=0)
             if f1 > best_f1:
-                best_f1, best_threshold = f1, threshold
-
-        thresholds.append(float(best_threshold))
-
-    return np.array(thresholds, dtype=np.float32)
+                best_f1, best_t = f1, t
+        thr.append(float(best_t))
+    return np.array(thr, dtype=np.float32)
 
 
-def metrics(true_labels, predicted_scores, thresholds):
-    predicted_labels = (predicted_scores >= thresholds).astype(int)
-    per_label_f1 = [
-        f1_score(true_labels[:, i], predicted_labels[:, i], zero_division=0)
-        for i in range(true_labels.shape[1])
-    ]
-    macro_f1 = float(np.mean(per_label_f1))
-    micro_f1 = f1_score(true_labels.ravel(), predicted_labels.ravel(), zero_division=0)
-    return macro_f1, micro_f1
+def metrics(y_true, y_score, thr):
+    from sklearn.metrics import f1_score
+    y_pred = (y_score >= thr).astype(int)
+    macro = f1_score(y_true, y_pred, average="macro", zero_division=0)
+    micro = f1_score(y_true, y_pred, average="micro", zero_division=0)
+    return float(macro), float(micro)
 
 
 def run_fold(df, train_index, val_index, tokenizer, device, fold_id):
     train_dataset = ToxicDataset(df.iloc[train_index], tokenizer, max_len=MAX_LENGTH)
     val_dataset = ToxicDataset(df.iloc[val_index], tokenizer, max_len=MAX_LENGTH)
 
-    train_loader = DataLoader(
-        train_dataset, batch_size=BATCH_SIZE, shuffle=True,
-        num_workers=NUM_WORKERS, pin_memory=True
-    )
-    val_loader = DataLoader(
-        val_dataset, batch_size=BATCH_SIZE, shuffle=False,
-        num_workers=NUM_WORKERS, pin_memory=True
-    )
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS, pin_memory=True)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS, pin_memory=True)
 
     model = HateBERTMultiLabel().to(device)
 
     train_label_matrix = np.vstack([batch["labels"].numpy() for batch in train_loader])
-    loss_fn = nn.BCEWithLogitsLoss(
-        pos_weight=pos_weight_from(train_label_matrix).to(device)
-    )
+    loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight_from(train_label_matrix).to(device))
 
     optimizer = torch.optim.AdamW(
         [
@@ -112,6 +98,7 @@ def run_fold(df, train_index, val_index, tokenizer, device, fold_id):
     # VALIDATION
     model.eval()
     logits_list, label_list = [], []
+
     with torch.no_grad():
         for batch in val_loader:
             labels = batch["labels"].numpy()
@@ -123,21 +110,21 @@ def run_fold(df, train_index, val_index, tokenizer, device, fold_id):
 
     logits = np.vstack(logits_list)
     labels = np.vstack(label_list)
-    probabilities = 1.0 / (1.0 + np.exp(-logits))
+
+    probabilities = torch.sigmoid(torch.from_numpy(logits)).numpy()
 
     thresholds = tune_thresholds(labels, probabilities)
     macro_f1, micro_f1 = metrics(labels, probabilities, thresholds)
 
-    save_path = f"./Models/model_fold{fold_id}.pt"
+    save_path = f"./Model/model_fold{fold_id}.pt"
     torch.save(model.state_dict(), save_path)
     print(f"Model saved → {save_path}")
 
     return macro_f1, micro_f1
 
-
 # ENTRY
 def main():
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = "cuda"
     df = load_df(TRAIN_CSV)
     tokenizer = Tokenizer()
     folds = k_fold(df)
