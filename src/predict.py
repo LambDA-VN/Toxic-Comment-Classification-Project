@@ -1,85 +1,53 @@
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
-from sklearn.metrics import f1_score, accuracy_score, multilabel_confusion_matrix
+from sklearn.metrics import accuracy_score, f1_score, precision_score
 
 from dataset import load_df, Tokenizer, ToxicDataset
 from model import HateBERTMultiLabel
 
 TEST_CSV = "./Dataset/test.csv"
-MODEL_PATH = "./Models/32b_model_fold1.pt"
+MODEL_PATH = "./Models/32b_model_fold4.pt"
+BATCH_SIZE = 32
+MAX_LEN = 256
 LABELS = ["toxic","severe_toxic","obscene","threat","insult","identity_hate"]
-BATCH_SIZE = 256
-MAX_LEN = 512
-
-def infer_probs(df, model, device):
-    ds = ToxicDataset(df, Tokenizer(), max_len=MAX_LEN)
-    loader = DataLoader(ds, batch_size=BATCH_SIZE, shuffle=False)
-    logits_all, labels_all = [], []
-    with torch.no_grad():
-        for batch in loader:
-            y = batch["labels"].numpy()
-            x = {k: v.to(device) for k, v in batch.items() if k != "labels"}
-            logits = model(x["input_ids"], x["attention_mask"]).cpu().numpy()
-            logits_all.append(logits)
-            labels_all.append(y)
-    y_true = np.vstack(labels_all)
-    probs = 1.0 / (1.0 + np.exp(-np.vstack(logits_all)))
-    return y_true, probs
-
-def tune_thresholds(y_true, probs, grid=None):
-    if grid is None:
-        grid = np.arange(0.05, 0.96, 0.01)
-    thres = np.full(len(LABELS), 0.5, dtype=np.float32)
-    for i in range(len(LABELS)):
-        p, y = probs[:, i], y_true[:, i]
-        best_t, best_f1 = 0.5, -1.0
-        for t in grid:
-            pred = (p >= t).astype(int)
-            f1 = f1_score(y, pred, zero_division=0)
-            if f1 > best_f1:
-                best_f1, best_t = f1, t
-        thres[i] = best_t
-    return thres
-
-def eval_with_thresholds(y_true, probs, thresholds):
-    y_pred = (probs >= thresholds[None, :]).astype(int)
-    micro = f1_score(y_true, y_pred, average="micro", zero_division=0)
-    macro = f1_score(y_true, y_pred, average="macro", zero_division=0)
-    per_f1 = f1_score(y_true, y_pred, average=None, zero_division=0)
-    subset_acc = accuracy_score(y_true, y_pred)
-    cm = multilabel_confusion_matrix(y_true, y_pred)
-
-    print("\n=== Thresholds (per label) ===")
-    for name, t in zip(LABELS, thresholds):
-        print(f"{name:14s}: {t:.2f}")
-
-    print("\n=== Overall ===")
-    print(f"Micro F1 : {micro:.4f}")
-    print(f"Macro F1 : {macro:.4f}")
-    print(f"Subset Accuracy : {subset_acc:.4f}")
-
-    print("\n=== Per-label F1 ===")
-    for name, f in zip(LABELS, per_f1):
-        print(f"{name:14s}: {f:.4f}")
-
-    print("\n=== Per-label Confusion Matrices (TN FP / FN TP) ===")
-    for i, name in enumerate(LABELS):
-        tn, fp, fn, tp = cm[i].ravel()
-        print(f"{name:14s}: [[{tn} {fp}], [{fn} {tp}]]")
 
 def main():
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = "cuda"
+
+    df = load_df(TEST_CSV)
+    ds = ToxicDataset(df, Tokenizer(), max_len=MAX_LEN)
+    loader = DataLoader(ds, batch_size=BATCH_SIZE, shuffle=False)
 
     model = HateBERTMultiLabel().to(device)
     model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
     model.eval()
 
-    df = load_df(TEST_CSV)
+    logits_list, labels_list = [], []
 
-    y_true, probs = infer_probs(df, model, device)
-    thresholds = tune_thresholds(y_true, probs)
-    eval_with_thresholds(y_true, probs, thresholds)
+    with torch.no_grad():
+        for batch in loader:
+            labels_list.append(batch["labels"].numpy())
+            batch = {k: v.to(device) for k, v in batch.items()}
+            logits = model(batch["input_ids"], batch["attention_mask"]).cpu().numpy()
+            logits_list.append(logits)
+
+    logits = np.vstack(logits_list)
+    labels = np.vstack(labels_list)
+    probs = torch.sigmoid(torch.from_numpy(logits)).numpy()
+    preds = (probs >= 0.5).astype(int)
+
+    acc = accuracy_score(labels, preds)
+    f1_macro = f1_score(labels, preds, average="macro", zero_division=0)
+    f1_micro = f1_score(labels, preds, average="micro", zero_division=0)
+    p_macro = precision_score(labels, preds, average="macro", zero_division=0)
+    p_micro = precision_score(labels, preds, average="micro", zero_division=0)
+
+    print(f"Accuracy     : {acc:.4f}")
+    print(f"F1 Macro     : {f1_macro:.4f}")
+    print(f"F1 Micro     : {f1_micro:.4f}")
+    print(f"Precision Mac: {p_macro:.4f}")
+    print(f"Precision Mic: {p_micro:.4f}")
 
 if __name__ == "__main__":
     main()
