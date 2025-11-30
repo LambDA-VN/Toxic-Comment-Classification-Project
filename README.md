@@ -42,7 +42,7 @@ identity_hate
 ## Project Structure
 
 ```
-📦 project
+project
 ├── dataset.py     → data loading + tokenizer + k-fold split + PyTorch dataset
 ├── model.py       → HateBERT encoder + linear multi-label head
 ├── train.py       → training loop, validation, threshold tuning, and metrics
@@ -83,7 +83,7 @@ pip install -r requirements.txt
 
 ## Usage
 
-### 🧠 Train with 5-fold cross-validation
+### Train with 5-fold cross-validation
 
 ```bash
 python train.py
@@ -98,42 +98,6 @@ Epoch 1 done | Avg loss 0.1987
 Fold 3: macro_f1=0.8124  micro_f1=0.8843
 Avg over 5 folds → macro_f1=0.7998  micro_f1=0.8721
 ```
-
-### 🔍 Run Inference on New Text
-
-Example script:
-
-```python
-import torch
-import numpy as np
-from transformers import AutoTokenizer
-from model import HateBERTMultiLabel, MODEL_NAME, NUM_LABELS
-
-device = "cuda" if torch.cuda.is_available() else "cpu"
-tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-
-model = HateBERTMultiLabel().to(device)
-model.load_state_dict(torch.load("./Model/model_fold1.pt"))
-model.eval()
-
-def predict(text, thresholds=None):
-    enc = tokenizer(text, return_tensors="pt", truncation=True, padding="max_length", max_length=256)
-    enc = {k: v.to(device) for k, v in enc.items()}
-    
-    with torch.no_grad():
-        logits = model(enc["input_ids"], enc["attention_mask"])
-        probs = torch.sigmoid(logits).cpu().numpy().flatten()
-
-    if thresholds is None:
-        return probs  # return raw probabilities
-    return (probs >= thresholds).astype(int)
-
-# Example
-sample = "You are an idiot and a danger to everyone."
-probs = predict(sample)
-print("Probabilities:", probs)
-```
-
 ## Notes
 
 * `Dataset/train.csv` must include column **comment_text** and the 6 label columns
@@ -147,6 +111,5 @@ Consider adding:
 * Mixed precision training (FP16/BF16)
 * Learning rate scheduling
 * Model ensembling across folds
-* Inference wrapper API (FastAPI/Flask)
 
 
